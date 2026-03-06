@@ -32,6 +32,20 @@
           "when": "editorTextFocus && (resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact)",
           "group": "navigation@10"
         }
+      ],
+      "editor/title/context": [
+        {
+          "command": "react-ai-analyzer.analyze",
+          "when": "resourceExtname == .js || resourceExtname == .jsx || resourceExtname == .ts || resourceExtname == .tsx",
+          "group": "navigation@10"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "react-ai-analyzer.analyze",
+          "when": "resourceExtname == .js || resourceExtname == .jsx || resourceExtname == .ts || resourceExtname == .tsx",
+          "group": "navigation@10"
+        }
       ]
     }
   },
