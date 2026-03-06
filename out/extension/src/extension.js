@@ -35,8 +35,17 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
 const reactParser_1 = require("../../analyzer/ast/reactParser");
 const dependencyGraph_1 = require("../../analyzer/graph/dependencyGraph");
+function getNonce() {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let value = "";
+    for (let i = 0; i < 16; i += 1) {
+        value += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return value;
+}
 function escapeHtml(value) {
     return value
         .replace(/&/g, "&amp;")
@@ -79,8 +88,10 @@ function toMermaidGraph(graph) {
     }
     return lines.join("\n");
 }
-function getWebviewHtml(analysis, graph) {
+function getWebviewHtml(webview, extensionUri, analysis, graph) {
     const mermaidSource = toMermaidGraph(graph);
+    const mermaidScriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(extensionUri.fsPath, "node_modules", "mermaid", "dist", "mermaid.min.js")));
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -92,17 +103,47 @@ function getWebviewHtml(analysis, graph) {
       h1 { margin: 0 0 8px; font-size: 20px; }
       h2 { margin: 20px 0 8px; font-size: 16px; }
       pre { background: #f6f8fa; border-radius: 8px; padding: 12px; overflow: auto; }
-      .graph-wrap { border: 1px solid #ddd; border-radius: 8px; padding: 12px; overflow: auto; }
+      .graph-wrap {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 420px;
+        overflow: hidden;
+        cursor: grab;
+        user-select: none;
+        background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+      }
+      .graph-wrap:active { cursor: grabbing; }
+      .graph-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .graph-toolbar button {
+        border: 1px solid #ccc;
+        background: #fff;
+        border-radius: 6px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .graph-toolbar button:hover { background: #f4f4f4; }
+      .graph-wrap svg { width: 100%; height: 100%; }
       .hint { color: #666; font-size: 12px; }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
+    <script nonce="${nonce}" src="${mermaidScriptUri}"></script>
   </head>
   <body>
     <h1>React Analyzer</h1>
-    <p class="hint">Dependency tree is rendered with Mermaid.js.</p>
+    <p class="hint">Dependency tree is rendered with Mermaid.js. Drag to pan, wheel to zoom, double-click or reset to restore.</p>
 
     <h2>Dependency Graph</h2>
-    <div class="graph-wrap">
+    <div class="graph-toolbar">
+      <span class="hint">Interactive view</span>
+      <button id="graphReset" type="button">Reset View</button>
+    </div>
+    <div class="graph-wrap" id="graphWrap">
       <div class="mermaid">${escapeHtml(mermaidSource)}</div>
     </div>
 
@@ -127,9 +168,80 @@ function getWebviewHtml(analysis, graph) {
     <h2>Raw Dependency Data</h2>
     <pre>${escapeHtml(JSON.stringify([...graph.entries()], null, 2))}</pre>
 
-    <script>
+    <script nonce="${nonce}">
+      const setupGraphInteractions = () => {
+        const wrap = document.getElementById("graphWrap")
+        const resetButton = document.getElementById("graphReset")
+        const svg = wrap ? wrap.querySelector("svg") : null
+        if (!wrap || !svg) return
+
+        const graphRoot = svg.querySelector("g")
+        if (!graphRoot) return
+
+        let scale = 1
+        let translateX = 0
+        let translateY = 0
+        let isDragging = false
+        let lastX = 0
+        let lastY = 0
+
+        const applyTransform = () => {
+          graphRoot.setAttribute("transform", "translate(" + translateX + "," + translateY + ") scale(" + scale + ")")
+        }
+
+        const resetTransform = () => {
+          scale = 1
+          translateX = 0
+          translateY = 0
+          applyTransform()
+        }
+
+        wrap.addEventListener("mousedown", event => {
+          isDragging = true
+          lastX = event.clientX
+          lastY = event.clientY
+        })
+
+        window.addEventListener("mousemove", event => {
+          if (!isDragging) return
+          translateX += event.clientX - lastX
+          translateY += event.clientY - lastY
+          lastX = event.clientX
+          lastY = event.clientY
+          applyTransform()
+        })
+
+        window.addEventListener("mouseup", () => {
+          isDragging = false
+        })
+
+        wrap.addEventListener("mouseleave", () => {
+          isDragging = false
+        })
+
+        wrap.addEventListener("wheel", event => {
+          event.preventDefault()
+          const zoomDelta = event.deltaY < 0 ? 1.1 : 0.9
+          const nextScale = Math.min(4, Math.max(0.3, scale * zoomDelta))
+          if (nextScale === scale) return
+
+          const rect = wrap.getBoundingClientRect()
+          const offsetX = event.clientX - rect.left
+          const offsetY = event.clientY - rect.top
+          const ratio = nextScale / scale
+          translateX = offsetX - (offsetX - translateX) * ratio
+          translateY = offsetY - (offsetY - translateY) * ratio
+          scale = nextScale
+          applyTransform()
+        }, { passive: false })
+
+        wrap.addEventListener("dblclick", resetTransform)
+        if (resetButton) resetButton.addEventListener("click", resetTransform)
+      }
+
       if (window.mermaid) {
-        window.mermaid.initialize({ startOnLoad: true, securityLevel: "loose", theme: "default" })
+        window.mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "default" })
+        window.mermaid.run({ querySelector: ".mermaid" }).then(setupGraphInteractions)
       }
     </script>
   </body>
@@ -151,8 +263,11 @@ function activate(context) {
         const code = document.getText();
         const analysis = (0, reactParser_1.analyzeReactCode)(code, document.fileName);
         const graph = (0, dependencyGraph_1.buildGraph)(analysis.components.map(name => ({ name, imports: analysis.imports })));
-        const panel = vscode.window.createWebviewPanel("reactAnalyzer", "React Analyzer", vscode.ViewColumn.One, { enableScripts: true });
-        panel.webview.html = getWebviewHtml(analysis, graph);
+        const panel = vscode.window.createWebviewPanel("reactAnalyzer", "React Analyzer", vscode.ViewColumn.One, {
+            enableScripts: true,
+            localResourceRoots: [context.extensionUri]
+        });
+        panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, analysis, graph);
     });
     const indexDisposable = vscode.commands.registerCommand("react-ai-analyzer.indexWorkspace", async () => {
         vscode.window.showInformationMessage("Indexing workspace...");

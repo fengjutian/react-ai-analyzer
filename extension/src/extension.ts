@@ -1,4 +1,5 @@
 import * as vscode from "vscode"
+import * as path from "path"
 import { analyzeReactCode } from "../../analyzer/ast/reactParser"
 import { buildGraph } from "../../analyzer/graph/dependencyGraph"
 
@@ -67,7 +68,7 @@ function getWebviewHtml(
 ) {
   const mermaidSource = toMermaidGraph(graph)
   const mermaidScriptUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, "node_modules", "mermaid", "dist", "mermaid.min.js")
+    vscode.Uri.file(path.join(extensionUri.fsPath, "node_modules", "mermaid", "dist", "mermaid.min.js"))
   )
   const nonce = getNonce()
 
@@ -82,7 +83,32 @@ function getWebviewHtml(
       h1 { margin: 0 0 8px; font-size: 20px; }
       h2 { margin: 20px 0 8px; font-size: 16px; }
       pre { background: #f6f8fa; border-radius: 8px; padding: 12px; overflow: auto; }
-      .graph-wrap { border: 1px solid #ddd; border-radius: 8px; padding: 12px; overflow: auto; }
+      .graph-wrap {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 420px;
+        overflow: hidden;
+        cursor: grab;
+        user-select: none;
+        background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+      }
+      .graph-wrap:active { cursor: grabbing; }
+      .graph-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .graph-toolbar button {
+        border: 1px solid #ccc;
+        background: #fff;
+        border-radius: 6px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .graph-toolbar button:hover { background: #f4f4f4; }
+      .graph-wrap svg { width: 100%; height: 100%; }
       .hint { color: #666; font-size: 12px; }
     </style>
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
@@ -90,10 +116,14 @@ function getWebviewHtml(
   </head>
   <body>
     <h1>React Analyzer</h1>
-    <p class="hint">Dependency tree is rendered with Mermaid.js.</p>
+    <p class="hint">Dependency tree is rendered with Mermaid.js. Drag to pan, wheel to zoom, double-click or reset to restore.</p>
 
     <h2>Dependency Graph</h2>
-    <div class="graph-wrap">
+    <div class="graph-toolbar">
+      <span class="hint">Interactive view</span>
+      <button id="graphReset" type="button">Reset View</button>
+    </div>
+    <div class="graph-wrap" id="graphWrap">
       <div class="mermaid">${escapeHtml(mermaidSource)}</div>
     </div>
 
@@ -119,8 +149,79 @@ function getWebviewHtml(
     <pre>${escapeHtml(JSON.stringify([...graph.entries()], null, 2))}</pre>
 
     <script nonce="${nonce}">
+      const setupGraphInteractions = () => {
+        const wrap = document.getElementById("graphWrap")
+        const resetButton = document.getElementById("graphReset")
+        const svg = wrap ? wrap.querySelector("svg") : null
+        if (!wrap || !svg) return
+
+        const graphRoot = svg.querySelector("g")
+        if (!graphRoot) return
+
+        let scale = 1
+        let translateX = 0
+        let translateY = 0
+        let isDragging = false
+        let lastX = 0
+        let lastY = 0
+
+        const applyTransform = () => {
+          graphRoot.setAttribute("transform", "translate(" + translateX + "," + translateY + ") scale(" + scale + ")")
+        }
+
+        const resetTransform = () => {
+          scale = 1
+          translateX = 0
+          translateY = 0
+          applyTransform()
+        }
+
+        wrap.addEventListener("mousedown", event => {
+          isDragging = true
+          lastX = event.clientX
+          lastY = event.clientY
+        })
+
+        window.addEventListener("mousemove", event => {
+          if (!isDragging) return
+          translateX += event.clientX - lastX
+          translateY += event.clientY - lastY
+          lastX = event.clientX
+          lastY = event.clientY
+          applyTransform()
+        })
+
+        window.addEventListener("mouseup", () => {
+          isDragging = false
+        })
+
+        wrap.addEventListener("mouseleave", () => {
+          isDragging = false
+        })
+
+        wrap.addEventListener("wheel", event => {
+          event.preventDefault()
+          const zoomDelta = event.deltaY < 0 ? 1.1 : 0.9
+          const nextScale = Math.min(4, Math.max(0.3, scale * zoomDelta))
+          if (nextScale === scale) return
+
+          const rect = wrap.getBoundingClientRect()
+          const offsetX = event.clientX - rect.left
+          const offsetY = event.clientY - rect.top
+          const ratio = nextScale / scale
+          translateX = offsetX - (offsetX - translateX) * ratio
+          translateY = offsetY - (offsetY - translateY) * ratio
+          scale = nextScale
+          applyTransform()
+        }, { passive: false })
+
+        wrap.addEventListener("dblclick", resetTransform)
+        if (resetButton) resetButton.addEventListener("click", resetTransform)
+      }
+
       if (window.mermaid) {
-        window.mermaid.initialize({ startOnLoad: true, securityLevel: "loose", theme: "default" })
+        window.mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "default" })
+        window.mermaid.run({ querySelector: ".mermaid" }).then(setupGraphInteractions)
       }
     </script>
   </body>
