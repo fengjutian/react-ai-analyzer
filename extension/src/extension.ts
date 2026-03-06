@@ -2,6 +2,15 @@ import * as vscode from "vscode"
 import { analyzeReactCode } from "../../analyzer/ast/reactParser"
 import { buildGraph } from "../../analyzer/graph/dependencyGraph"
 
+function getNonce() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+  let value = ""
+  for (let i = 0; i < 16; i += 1) {
+    value += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  return value
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -50,8 +59,17 @@ function toMermaidGraph(graph: Map<string, string[]>) {
   return lines.join("\n")
 }
 
-function getWebviewHtml(analysis: ReturnType<typeof analyzeReactCode>, graph: Map<string, string[]>) {
+function getWebviewHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  analysis: ReturnType<typeof analyzeReactCode>,
+  graph: Map<string, string[]>
+) {
   const mermaidSource = toMermaidGraph(graph)
+  const mermaidScriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, "node_modules", "mermaid", "dist", "mermaid.min.js")
+  )
+  const nonce = getNonce()
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -67,7 +85,8 @@ function getWebviewHtml(analysis: ReturnType<typeof analyzeReactCode>, graph: Ma
       .graph-wrap { border: 1px solid #ddd; border-radius: 8px; padding: 12px; overflow: auto; }
       .hint { color: #666; font-size: 12px; }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
+    <script nonce="${nonce}" src="${mermaidScriptUri}"></script>
   </head>
   <body>
     <h1>React Analyzer</h1>
@@ -99,7 +118,7 @@ function getWebviewHtml(analysis: ReturnType<typeof analyzeReactCode>, graph: Ma
     <h2>Raw Dependency Data</h2>
     <pre>${escapeHtml(JSON.stringify([...graph.entries()], null, 2))}</pre>
 
-    <script>
+    <script nonce="${nonce}">
       if (window.mermaid) {
         window.mermaid.initialize({ startOnLoad: true, securityLevel: "loose", theme: "default" })
       }
@@ -135,10 +154,13 @@ export function activate(context: vscode.ExtensionContext) {
         "reactAnalyzer",
         "React Analyzer",
         vscode.ViewColumn.One,
-        { enableScripts: true }
+        {
+          enableScripts: true,
+          localResourceRoots: [context.extensionUri]
+        }
       )
 
-      panel.webview.html = getWebviewHtml(analysis, graph)
+      panel.webview.html = getWebviewHtml(panel.webview, context.extensionUri, analysis, graph)
     }
   )
 

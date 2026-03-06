@@ -80,6 +80,7 @@
     "@babel/traverse": "^7.29.0",
     "axios": "^1.6.2",
     "langchain": "^0.0.207",
+    "mermaid": "^10.9.1",
     "node-fetch": "^3.3.2",
     "tree-sitter": "^0.20.6",
     "tree-sitter-typescript": "^0.20.3",
