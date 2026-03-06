@@ -28,6 +28,11 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
+    "@babel/types": "^7.29.0",
+    "@types/babel__core": "^7.20.5",
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__template": "^7.4.4",
+    "@types/babel__traverse": "^7.28.0",
     "@types/glob": "^8.1.0",
     "@types/mocha": "^10.0.6",
     "@types/node": "20.x",
@@ -45,6 +50,7 @@
     "@babel/traverse": "^7.29.0",
     "axios": "^1.6.2",
     "langchain": "^0.0.207",
+    "node-fetch": "^3.3.2",
     "tree-sitter": "^0.20.6",
     "tree-sitter-typescript": "^0.20.3",
     "vscode": "^1.1.37"

@@ -1,5 +1,6 @@
 import { parse } from "@babel/parser"
-import traverse from "@babel/traverse"
+import traverse, { NodePath } from "@babel/traverse"
+import * as t from "@babel/types"
 
 export function analyzeReactCode(code: string) {
   const ast = parse(code, {
@@ -14,16 +15,16 @@ export function analyzeReactCode(code: string) {
   }
 
   traverse(ast, {
-    ImportDeclaration(path) {
+    ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
       result.imports.push(path.node.source.value)
     },
-    FunctionDeclaration(path) {
+    FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
       const name = path.node.id?.name
       if (name && /^[A-Z]/.test(name)) result.components.push(name)
     },
-    CallExpression(path) {
+    CallExpression(path: NodePath<t.CallExpression>) {
       const callee = path.node.callee
-      if (callee.type === "Identifier" && /^use/.test(callee.name)) {
+      if (t.isIdentifier(callee) && /^use/.test(callee.name)) {
         result.hooks.push(callee.name)
       }
     }

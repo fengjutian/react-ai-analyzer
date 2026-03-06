@@ -1,16 +1,11 @@
 export class VectorStore {
-    private vectors: Map<string, number[]> = new Map();
+  private store: { vector: number[], metadata: any }[] = []
 
-    public async add(id: string, vector: number[]) {
-        this.vectors.set(id, vector);
-    }
+  add(vector: number[], metadata: any) {
+    this.store.push({ vector, metadata })
+  }
 
-    public async search(vector: number[], limit: number = 5): Promise<string[]> {
-        // Implement cosine similarity search or similar
-        return Array.from(this.vectors.keys()).slice(0, limit);
-    }
-
-    public clear() {
-        this.vectors.clear();
-    }
+  search(query: number[]): any[] {
+    return this.store.slice(0, 5).map(x => x.metadata)
+  }
 }
