@@ -61,22 +61,102 @@ function analyzeReactCode(code, filePath) {
     const result = {
         components: [],
         hooks: [],
-        imports: []
+        imports: [],
+        importSpecifiers: [],
+        exports: [],
+        stateVariables: [],
+        jsxElements: []
+    };
+    const pushUnique = (list, value) => {
+        if (!value)
+            return;
+        if (!list.includes(value))
+            list.push(value);
+    };
+    const getCallName = (callee) => {
+        if (t.isIdentifier(callee))
+            return callee.name;
+        if (t.isMemberExpression(callee) && t.isIdentifier(callee.property)) {
+            return callee.property.name;
+        }
+        return undefined;
+    };
+    const getJsxName = (name) => {
+        if (t.isJSXIdentifier(name))
+            return name.name;
+        if (t.isJSXMemberExpression(name)) {
+            const objectName = t.isJSXIdentifier(name.object) ? name.object.name : undefined;
+            const propertyName = t.isJSXIdentifier(name.property) ? name.property.name : undefined;
+            if (!objectName || !propertyName)
+                return undefined;
+            return `${objectName}.${propertyName}`;
+        }
+        return undefined;
     };
     (0, traverse_1.default)(ast, {
         ImportDeclaration(path) {
-            result.imports.push(path.node.source.value);
+            pushUnique(result.imports, path.node.source.value);
+            path.node.specifiers.forEach(specifier => {
+                pushUnique(result.importSpecifiers, specifier.local.name);
+            });
         },
         FunctionDeclaration(path) {
             const name = path.node.id?.name;
             if (name && /^[A-Z]/.test(name))
-                result.components.push(name);
+                pushUnique(result.components, name);
+        },
+        VariableDeclarator(path) {
+            if (t.isIdentifier(path.node.id) && path.node.id.name && /^[A-Z]/.test(path.node.id.name)) {
+                const init = path.node.init;
+                if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
+                    pushUnique(result.components, path.node.id.name);
+                }
+            }
+            if (!t.isArrayPattern(path.node.id) || !path.node.init)
+                return;
+            if (!t.isCallExpression(path.node.init))
+                return;
+            const callName = getCallName(path.node.init.callee);
+            if (callName !== "useState")
+                return;
+            path.node.id.elements.forEach(element => {
+                if (t.isIdentifier(element))
+                    pushUnique(result.stateVariables, element.name);
+            });
         },
         CallExpression(path) {
-            const callee = path.node.callee;
-            if (t.isIdentifier(callee) && /^use/.test(callee.name)) {
-                result.hooks.push(callee.name);
+            const callName = getCallName(path.node.callee);
+            if (callName && /^use/.test(callName)) {
+                pushUnique(result.hooks, callName);
             }
+        },
+        ExportNamedDeclaration(path) {
+            path.node.specifiers.forEach(specifier => {
+                if (t.isExportSpecifier(specifier) && t.isIdentifier(specifier.exported)) {
+                    pushUnique(result.exports, specifier.exported.name);
+                }
+            });
+            const declaration = path.node.declaration;
+            if (t.isFunctionDeclaration(declaration) && declaration.id) {
+                pushUnique(result.exports, declaration.id.name);
+            }
+            if (t.isVariableDeclaration(declaration)) {
+                declaration.declarations.forEach(item => {
+                    if (t.isIdentifier(item.id))
+                        pushUnique(result.exports, item.id.name);
+                });
+            }
+        },
+        ExportDefaultDeclaration(path) {
+            const declaration = path.node.declaration;
+            if (t.isIdentifier(declaration))
+                pushUnique(result.exports, declaration.name);
+            if (t.isFunctionDeclaration(declaration) && declaration.id) {
+                pushUnique(result.exports, declaration.id.name);
+            }
+        },
+        JSXOpeningElement(path) {
+            pushUnique(result.jsxElements, getJsxName(path.node.name));
         }
     });
     return result;
