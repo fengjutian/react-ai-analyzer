@@ -38,12 +38,12 @@ const vscode = __importStar(require("vscode"));
 const reactParser_1 = require("../../analyzer/ast/reactParser");
 const dependencyGraph_1 = require("../../analyzer/graph/dependencyGraph");
 function activate(context) {
-    const disposable = vscode.commands.registerCommand("react-ai.analyze", async () => {
+    const analyzeDisposable = vscode.commands.registerCommand("react-ai-analyzer.analyze", async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor)
             return;
         const code = editor.document.getText();
-        const analysis = (0, reactParser_1.analyzeReactCode)(code);
+        const analysis = (0, reactParser_1.analyzeReactCode)(code, editor.document.fileName);
         const graph = (0, dependencyGraph_1.buildGraph)(analysis.components.map(name => ({ name, imports: analysis.imports })));
         // 弹出 Webview 面板显示结果
         const panel = vscode.window.createWebviewPanel("reactAnalyzer", "React Analyzer", vscode.ViewColumn.One, {});
@@ -60,6 +60,13 @@ function activate(context) {
         </html>
       `;
     });
-    context.subscriptions.push(disposable);
+    const indexDisposable = vscode.commands.registerCommand("react-ai-analyzer.indexWorkspace", async () => {
+        vscode.window.showInformationMessage("Indexing workspace...");
+        // 模拟索引逻辑
+        setTimeout(() => {
+            vscode.window.showInformationMessage("Indexing completed!");
+        }, 2000);
+    });
+    context.subscriptions.push(analyzeDisposable, indexDisposable);
 }
 //# sourceMappingURL=extension.js.map

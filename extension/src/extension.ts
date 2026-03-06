@@ -4,14 +4,14 @@ import { buildGraph } from "../../analyzer/graph/dependencyGraph"
 
 export function activate(context: vscode.ExtensionContext) {
 
-  const disposable = vscode.commands.registerCommand(
-    "react-ai.analyze",
+  const analyzeDisposable = vscode.commands.registerCommand(
+    "react-ai-analyzer.analyze",
     async () => {
       const editor = vscode.window.activeTextEditor
       if (!editor) return
 
       const code = editor.document.getText()
-      const analysis = analyzeReactCode(code)
+      const analysis = analyzeReactCode(code, editor.document.fileName)
       const graph = buildGraph(
         analysis.components.map(name => ({ name, imports: analysis.imports }))
       )
@@ -38,5 +38,16 @@ export function activate(context: vscode.ExtensionContext) {
     }
   )
 
-  context.subscriptions.push(disposable)
+  const indexDisposable = vscode.commands.registerCommand(
+    "react-ai-analyzer.indexWorkspace",
+    async () => {
+      vscode.window.showInformationMessage("Indexing workspace...");
+      // 模拟索引逻辑
+      setTimeout(() => {
+        vscode.window.showInformationMessage("Indexing completed!");
+      }, 2000);
+    }
+  )
+
+  context.subscriptions.push(analyzeDisposable, indexDisposable)
 }

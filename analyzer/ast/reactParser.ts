@@ -1,11 +1,21 @@
 import { parse } from "@babel/parser"
 import traverse, { NodePath } from "@babel/traverse"
 import * as t from "@babel/types"
+import * as path from "path"
 
-export function analyzeReactCode(code: string) {
+function getParserPlugins(filePath?: string): ("jsx" | "typescript")[] {
+  const ext = filePath ? path.extname(filePath).toLowerCase() : ""
+  if (ext === ".ts") return ["typescript"]
+  if (ext === ".tsx") return ["typescript", "jsx"]
+  if (ext === ".jsx") return ["jsx"]
+  if (ext === ".js") return ["jsx"]
+  return ["typescript", "jsx"]
+}
+
+export function analyzeReactCode(code: string, filePath?: string) {
   const ast = parse(code, {
     sourceType: "module",
-    plugins: ["jsx", "typescript"]
+    plugins: getParserPlugins(filePath)
   })
 
   const result = {

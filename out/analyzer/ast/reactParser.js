@@ -40,10 +40,23 @@ exports.analyzeReactCode = analyzeReactCode;
 const parser_1 = require("@babel/parser");
 const traverse_1 = __importDefault(require("@babel/traverse"));
 const t = __importStar(require("@babel/types"));
-function analyzeReactCode(code) {
+const path = __importStar(require("path"));
+function getParserPlugins(filePath) {
+    const ext = filePath ? path.extname(filePath).toLowerCase() : "";
+    if (ext === ".ts")
+        return ["typescript"];
+    if (ext === ".tsx")
+        return ["typescript", "jsx"];
+    if (ext === ".jsx")
+        return ["jsx"];
+    if (ext === ".js")
+        return ["jsx"];
+    return ["typescript", "jsx"];
+}
+function analyzeReactCode(code, filePath) {
     const ast = (0, parser_1.parse)(code, {
         sourceType: "module",
-        plugins: ["jsx", "typescript"]
+        plugins: getParserPlugins(filePath)
     });
     const result = {
         components: [],

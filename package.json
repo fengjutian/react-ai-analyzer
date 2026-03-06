@@ -9,13 +9,20 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
-  "main": "./extension/out/extension.js",
+  "activationEvents": [
+    "onCommand:react-ai-analyzer.analyze",
+    "onCommand:react-ai-analyzer.indexWorkspace"
+  ],
+  "main": "./out/extension/src/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "react-ai-analyzer.analyze",
         "title": "Analyze React Code"
+      },
+      {
+        "command": "react-ai-analyzer.indexWorkspace",
+        "title": "Index Workspace for Analysis"
       }
     ]
   },
