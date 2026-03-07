@@ -21,43 +21,158 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#39;")
 }
 
-function escapeMermaidLabel(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/\"/g, "\\\"")
+function safeJsonForScript(value: unknown) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
 }
 
-function toMermaidGraph(graph: Map<string, string[]>) {
-  const lines: string[] = ["flowchart LR"]
-  const idByLabel = new Map<string, string>()
+type D3Node = {
+  id: string
+  kind: "component" | "dependency"
+}
+
+type D3Link = {
+  source: string
+  target: string
+}
+
+type D3FeatureNode = {
+  id: string
+  kind: "root" | "component" | "function" | "prop" | "group" | "type" | "interface" | "imported-component"
+}
+
+type D3FeatureLink = {
+  source: string
+  target: string
+}
+
+function toD3GraphData(graph: Map<string, string[]>) {
+  const nodeMap = new Map<string, D3Node>()
+  const links: D3Link[] = []
   const edgeSet = new Set<string>()
-  let nodeCounter = 0
 
-  const ensureNode = (label: string) => {
-    let id = idByLabel.get(label)
-    if (id) return id
-
-    nodeCounter += 1
-    id = `N${nodeCounter}`
-    idByLabel.set(label, id)
-    lines.push(`${id}[\"${escapeMermaidLabel(label)}\"]`)
-    return id
+  const ensureNode = (id: string, kind: D3Node["kind"]) => {
+    const current = nodeMap.get(id)
+    if (current) {
+      if (kind === "component") current.kind = "component"
+      return
+    }
+    nodeMap.set(id, { id, kind })
   }
 
-  for (const [name, imports] of graph.entries()) {
-    const fromId = ensureNode(name)
-    for (const dep of imports) {
-      const toId = ensureNode(dep)
-      const edgeKey = `${fromId}->${toId}`
-      if (edgeSet.has(edgeKey)) continue
-      edgeSet.add(edgeKey)
-      lines.push(`${fromId} --> ${toId}`)
+  for (const [componentName, imports] of graph.entries()) {
+    ensureNode(componentName, "component")
+    for (const dependencyName of imports) {
+      ensureNode(dependencyName, "dependency")
+      const edgeId = `${componentName}->${dependencyName}`
+      if (edgeSet.has(edgeId)) continue
+      edgeSet.add(edgeId)
+      links.push({ source: componentName, target: dependencyName })
     }
   }
 
-  if (nodeCounter === 0) {
-    lines.push('Empty["No dependencies found"]')
+  if (nodeMap.size === 0) {
+    nodeMap.set("No dependencies found", { id: "No dependencies found", kind: "dependency" })
   }
 
-  return lines.join("\n")
+  return {
+    nodes: [...nodeMap.values()],
+    links
+  }
+}
+
+function toFeatureGraphData(analysis: ReturnType<typeof analyzeReactCode>) {
+  const nodeMap = new Map<string, D3FeatureNode>()
+  const links: D3FeatureLink[] = []
+  const edgeSet = new Set<string>()
+
+  const ensureNode = (id: string, kind: D3FeatureNode["kind"]) => {
+    if (!nodeMap.has(id)) {
+      nodeMap.set(id, { id, kind })
+    }
+  }
+
+  const addLink = (source: string, target: string) => {
+    const edgeId = `${source}->${target}`
+    if (edgeSet.has(edgeId)) return
+    edgeSet.add(edgeId)
+    links.push({ source, target })
+  }
+
+  const root = "Current File"
+  const propGroup = "Props"
+  const functionGroup = "Functions"
+  const forwardRefGroup = "forwardRef Components"
+  const fcGroup = "React.FC Components"
+  const importedComponentGroup = "Imported Components"
+  const interfaceGroup = "Interfaces"
+  const typeGroup = "Type Aliases"
+
+  ensureNode(root, "root")
+  ensureNode(propGroup, "group")
+  ensureNode(functionGroup, "group")
+  ensureNode(forwardRefGroup, "group")
+  ensureNode(fcGroup, "group")
+  ensureNode(importedComponentGroup, "group")
+  ensureNode(interfaceGroup, "group")
+  ensureNode(typeGroup, "group")
+
+  addLink(root, propGroup)
+  addLink(root, functionGroup)
+  addLink(root, forwardRefGroup)
+  addLink(root, fcGroup)
+  addLink(root, importedComponentGroup)
+  addLink(root, interfaceGroup)
+  addLink(root, typeGroup)
+
+  analysis.components.forEach(component => {
+    ensureNode(component, "component")
+    addLink(root, component)
+  })
+
+  const allProps = [...new Set([...analysis.props, ...analysis.jsxAttributes])]
+  allProps.forEach(prop => {
+    ensureNode(prop, "prop")
+    addLink(propGroup, prop)
+  })
+
+  const allFunctions = [...new Set([...analysis.functions, ...analysis.methods])]
+  allFunctions.forEach(fn => {
+    ensureNode(fn, "function")
+    addLink(functionGroup, fn)
+  })
+
+  analysis.forwardRefComponents.forEach(component => {
+    ensureNode(component, "component")
+    addLink(forwardRefGroup, component)
+  })
+
+  analysis.fcComponents.forEach(component => {
+    ensureNode(component, "component")
+    addLink(fcGroup, component)
+  })
+
+  analysis.componentImports.forEach(component => {
+    ensureNode(component, "imported-component")
+    addLink(importedComponentGroup, component)
+  })
+
+  analysis.interfaces.forEach(name => {
+    ensureNode(name, "interface")
+    addLink(interfaceGroup, name)
+  })
+
+  analysis.types.forEach(name => {
+    ensureNode(name, "type")
+    addLink(typeGroup, name)
+  })
+
+  return {
+    nodes: [...nodeMap.values()],
+    links
+  }
 }
 
 function getWebviewHtml(
@@ -66,9 +181,10 @@ function getWebviewHtml(
   analysis: ReturnType<typeof analyzeReactCode>,
   graph: Map<string, string[]>
 ) {
-  const mermaidSource = toMermaidGraph(graph)
-  const mermaidScriptUri = webview.asWebviewUri(
-    vscode.Uri.file(path.join(extensionUri.fsPath, "node_modules", "mermaid", "dist", "mermaid.min.js"))
+  const graphData = toD3GraphData(graph)
+  const featureGraphData = toFeatureGraphData(analysis)
+  const d3ScriptUri = webview.asWebviewUri(
+    vscode.Uri.file(path.join(extensionUri.fsPath, "node_modules", "d3", "dist", "d3.min.js"))
   )
   const nonce = getNonce()
 
@@ -86,14 +202,11 @@ function getWebviewHtml(
       .graph-wrap {
         border: 1px solid #ddd;
         border-radius: 8px;
-        padding: 12px;
-        min-height: 420px;
+        min-height: 460px;
+        height: 460px;
         overflow: hidden;
-        cursor: grab;
-        user-select: none;
         background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
       }
-      .graph-wrap:active { cursor: grabbing; }
       .graph-toolbar {
         display: flex;
         justify-content: space-between;
@@ -108,33 +221,127 @@ function getWebviewHtml(
         cursor: pointer;
       }
       .graph-toolbar button:hover { background: #f4f4f4; }
-      .graph-wrap svg { width: 100%; height: 100%; }
       .hint { color: #666; font-size: 12px; }
+      #graphSvg { width: 100%; height: 100%; display: block; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+      }
+      .card {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 10px;
+        background: #fff;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .tag {
+        background: #eff6ff;
+        color: #1d4ed8;
+        border: 1px solid #bfdbfe;
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 12px;
+      }
+      .tag-empty {
+        color: #6b7280;
+        font-size: 12px;
+      }
     </style>
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
-    <script nonce="${nonce}" src="${mermaidScriptUri}"></script>
+    <script nonce="${nonce}" src="${d3ScriptUri}"></script>
   </head>
   <body>
     <h1>React Analyzer</h1>
-    <p class="hint">Dependency tree is rendered with Mermaid.js. Drag to pan, wheel to zoom, double-click or reset to restore.</p>
+    <p class="hint">Dependency tree rendered with D3 force graph. Drag nodes to pin, drag canvas to pan, wheel to zoom.</p>
 
     <h2>Dependency Graph</h2>
     <div class="graph-toolbar">
-      <span class="hint">Interactive view</span>
+      <span class="hint">Component: blue, Dependency: orange</span>
       <button id="graphReset" type="button">Reset View</button>
     </div>
     <div class="graph-wrap" id="graphWrap">
-      <div class="mermaid">${escapeHtml(mermaidSource)}</div>
+      <svg id="graphSvg"></svg>
+    </div>
+
+    <h2>Function & Props Relationship</h2>
+    <div class="graph-toolbar">
+      <span class="hint">Root: purple, Component: blue, Imported: cyan, Function: green, Prop: orange, Interface: red, Type: brown</span>
+      <button id="featureGraphReset" type="button">Reset View</button>
+    </div>
+    <div class="graph-wrap" id="featureGraphWrap">
+      <svg id="featureGraphSvg"></svg>
     </div>
 
     <h2>Components</h2>
     <pre>${escapeHtml(JSON.stringify(analysis.components, null, 2))}</pre>
 
+    <h2>Imported Components</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.componentImports, null, 2))}</pre>
+
+    <h2>Function & Props View</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>React.forwardRef Components</h3>
+        <div class="tags">${
+          analysis.forwardRefComponents.length
+            ? analysis.forwardRefComponents.map(name => `<span class="tag">${escapeHtml(name)}</span>`).join("")
+            : '<span class="tag-empty">None</span>'
+        }</div>
+      </div>
+      <div class="card">
+        <h3>React.FC Components</h3>
+        <div class="tags">${
+          analysis.fcComponents.length
+            ? analysis.fcComponents.map(name => `<span class="tag">${escapeHtml(name)}</span>`).join("")
+            : '<span class="tag-empty">None</span>'
+        }</div>
+      </div>
+      <div class="card">
+        <h3>Functions</h3>
+        <div class="tags">${
+          analysis.functions.length
+            ? analysis.functions.map(name => `<span class="tag">${escapeHtml(name)}</span>`).join("")
+            : '<span class="tag-empty">None</span>'
+        }</div>
+      </div>
+      <div class="card">
+        <h3>Properties (Props + JSX Attributes)</h3>
+        <div class="tags">${
+          [...new Set([...analysis.props, ...analysis.jsxAttributes])].length
+            ? [...new Set([...analysis.props, ...analysis.jsxAttributes])]
+                .map(name => `<span class="tag">${escapeHtml(name)}</span>`)
+                .join("")
+            : '<span class="tag-empty">None</span>'
+        }</div>
+      </div>
+    </div>
+
     <h2>Hooks</h2>
     <pre>${escapeHtml(JSON.stringify(analysis.hooks, null, 2))}</pre>
 
+    <h2>Props</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.props, null, 2))}</pre>
+
+    <h2>Methods</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.methods, null, 2))}</pre>
+
     <h2>Exports</h2>
     <pre>${escapeHtml(JSON.stringify(analysis.exports, null, 2))}</pre>
+
+    <h2>Interfaces</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.interfaces, null, 2))}</pre>
+
+    <h2>Type Aliases</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.types, null, 2))}</pre>
 
     <h2>Import Specifiers</h2>
     <pre>${escapeHtml(JSON.stringify(analysis.importSpecifiers, null, 2))}</pre>
@@ -145,83 +352,162 @@ function getWebviewHtml(
     <h2>JSX Elements</h2>
     <pre>${escapeHtml(JSON.stringify(analysis.jsxElements, null, 2))}</pre>
 
+    <h2>ForwardRef Components</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.forwardRefComponents, null, 2))}</pre>
+
+    <h2>FC Components</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.fcComponents, null, 2))}</pre>
+
+    <h2>Functions</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.functions, null, 2))}</pre>
+
+    <h2>JSX Attributes</h2>
+    <pre>${escapeHtml(JSON.stringify(analysis.jsxAttributes, null, 2))}</pre>
+
     <h2>Raw Dependency Data</h2>
     <pre>${escapeHtml(JSON.stringify([...graph.entries()], null, 2))}</pre>
 
     <script nonce="${nonce}">
-      const setupGraphInteractions = () => {
-        const wrap = document.getElementById("graphWrap")
-        const resetButton = document.getElementById("graphReset")
-        const svg = wrap ? wrap.querySelector("svg") : null
-        if (!wrap || !svg) return
+      const parsed = ${safeJsonForScript(graphData)}
+      const featureParsed = ${safeJsonForScript(featureGraphData)}
+      const graphWrap = document.getElementById("graphWrap")
+      const featureGraphWrap = document.getElementById("featureGraphWrap")
 
-        const graphRoot = svg.querySelector("g")
-        if (!graphRoot) return
+      if (!window.d3) {
+        if (graphWrap) {
+          graphWrap.innerHTML = "<div style='padding:12px;color:#b91c1c;'>D3 failed to load.</div>"
+        }
+        if (featureGraphWrap) {
+          featureGraphWrap.innerHTML = "<div style='padding:12px;color:#b91c1c;'>D3 failed to load.</div>"
+        }
+      } else {
+        const d3 = window.d3
+        const renderGraph = (options) => {
+          const svg = d3.select(options.svgSelector)
+          const wrap = document.getElementById(options.wrapId)
+          if (!wrap) return
 
-        let scale = 1
-        let translateX = 0
-        let translateY = 0
-        let isDragging = false
-        let lastX = 0
-        let lastY = 0
+          const width = wrap.clientWidth || 900
+          const height = wrap.clientHeight || 460
+          svg.attr("viewBox", [0, 0, width, height])
 
-        const applyTransform = () => {
-          graphRoot.setAttribute("transform", "translate(" + translateX + "," + translateY + ") scale(" + scale + ")")
+          const zoomLayer = svg.append("g")
+          const link = zoomLayer
+            .append("g")
+            .attr("stroke", "#a0aec0")
+            .attr("stroke-opacity", 0.7)
+            .selectAll("line")
+            .data(options.data.links)
+            .join("line")
+            .attr("stroke-width", 1.5)
+
+          const node = zoomLayer
+            .append("g")
+            .selectAll("circle")
+            .data(options.data.nodes)
+            .join("circle")
+            .attr("r", d => options.radiusByKind[d.kind] || 7)
+            .attr("fill", d => options.colorByKind[d.kind] || "#6b7280")
+            .attr("stroke", "#ffffff")
+            .attr("stroke-width", 1.5)
+
+          const label = zoomLayer
+            .append("g")
+            .selectAll("text")
+            .data(options.data.nodes)
+            .join("text")
+            .text(d => d.id)
+            .attr("font-size", 11)
+            .attr("fill", "#1f2937")
+
+          const simulation = d3.forceSimulation(options.data.nodes)
+            .force("link", d3.forceLink(options.data.links).id(d => d.id).distance(90))
+            .force("charge", d3.forceManyBody().strength(-280))
+            .force("center", d3.forceCenter(width / 2, height / 2))
+            .force("collision", d3.forceCollide().radius(20))
+
+          simulation.on("tick", () => {
+            link
+              .attr("x1", d => d.source.x)
+              .attr("y1", d => d.source.y)
+              .attr("x2", d => d.target.x)
+              .attr("y2", d => d.target.y)
+
+            node
+              .attr("cx", d => d.x)
+              .attr("cy", d => d.y)
+
+            label
+              .attr("x", d => d.x + 12)
+              .attr("y", d => d.y + 4)
+          })
+
+          const drag = d3.drag()
+            .on("start", (event, d) => {
+              if (!event.active) simulation.alphaTarget(0.3).restart()
+              d.fx = d.x
+              d.fy = d.y
+            })
+            .on("drag", (event, d) => {
+              d.fx = event.x
+              d.fy = event.y
+            })
+            .on("end", (event, d) => {
+              if (!event.active) simulation.alphaTarget(0)
+              d.fx = event.x
+              d.fy = event.y
+            })
+
+          node.call(drag)
+
+          const zoom = d3.zoom().scaleExtent([0.3, 4]).on("zoom", event => {
+            zoomLayer.attr("transform", event.transform)
+          })
+          svg.call(zoom)
+
+          const resetButton = document.getElementById(options.resetButtonId)
+          if (resetButton) {
+            resetButton.addEventListener("click", () => {
+              svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity)
+            })
+          }
         }
 
-        const resetTransform = () => {
-          scale = 1
-          translateX = 0
-          translateY = 0
-          applyTransform()
-        }
-
-        wrap.addEventListener("mousedown", event => {
-          isDragging = true
-          lastX = event.clientX
-          lastY = event.clientY
+        renderGraph({
+          svgSelector: "#graphSvg",
+          wrapId: "graphWrap",
+          resetButtonId: "graphReset",
+          data: parsed,
+          colorByKind: { component: "#2563eb", dependency: "#f59e0b" },
+          radiusByKind: { component: 10, dependency: 7 }
         })
 
-        window.addEventListener("mousemove", event => {
-          if (!isDragging) return
-          translateX += event.clientX - lastX
-          translateY += event.clientY - lastY
-          lastX = event.clientX
-          lastY = event.clientY
-          applyTransform()
+        renderGraph({
+          svgSelector: "#featureGraphSvg",
+          wrapId: "featureGraphWrap",
+          resetButtonId: "featureGraphReset",
+          data: featureParsed,
+          colorByKind: {
+            root: "#9333ea",
+            group: "#7c3aed",
+            component: "#2563eb",
+            "imported-component": "#0ea5e9",
+            function: "#16a34a",
+            prop: "#ea580c",
+            interface: "#dc2626",
+            type: "#7c2d12"
+          },
+          radiusByKind: {
+            root: 12,
+            group: 10,
+            component: 9,
+            "imported-component": 9,
+            function: 8,
+            prop: 8,
+            interface: 8,
+            type: 8
+          }
         })
-
-        window.addEventListener("mouseup", () => {
-          isDragging = false
-        })
-
-        wrap.addEventListener("mouseleave", () => {
-          isDragging = false
-        })
-
-        wrap.addEventListener("wheel", event => {
-          event.preventDefault()
-          const zoomDelta = event.deltaY < 0 ? 1.1 : 0.9
-          const nextScale = Math.min(4, Math.max(0.3, scale * zoomDelta))
-          if (nextScale === scale) return
-
-          const rect = wrap.getBoundingClientRect()
-          const offsetX = event.clientX - rect.left
-          const offsetY = event.clientY - rect.top
-          const ratio = nextScale / scale
-          translateX = offsetX - (offsetX - translateX) * ratio
-          translateY = offsetY - (offsetY - translateY) * ratio
-          scale = nextScale
-          applyTransform()
-        }, { passive: false })
-
-        wrap.addEventListener("dblclick", resetTransform)
-        if (resetButton) resetButton.addEventListener("click", resetTransform)
-      }
-
-      if (window.mermaid) {
-        window.mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "default" })
-        window.mermaid.run({ querySelector: ".mermaid" }).then(setupGraphInteractions)
       }
     </script>
   </body>

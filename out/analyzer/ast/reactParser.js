@@ -60,12 +60,21 @@ function analyzeReactCode(code, filePath) {
     });
     const result = {
         components: [],
+        forwardRefComponents: [],
+        fcComponents: [],
+        componentImports: [],
         hooks: [],
         imports: [],
         importSpecifiers: [],
         exports: [],
+        interfaces: [],
+        types: [],
+        props: [],
+        functions: [],
+        methods: [],
         stateVariables: [],
-        jsxElements: []
+        jsxElements: [],
+        jsxAttributes: []
     };
     const pushUnique = (list, value) => {
         if (!value)
@@ -81,6 +90,30 @@ function analyzeReactCode(code, filePath) {
         }
         return undefined;
     };
+    const isForwardRefCall = (callee) => {
+        if (t.isIdentifier(callee))
+            return callee.name === "forwardRef";
+        if (t.isMemberExpression(callee)) {
+            return t.isIdentifier(callee.object) && callee.object.name === "React"
+                && t.isIdentifier(callee.property) && callee.property.name === "forwardRef";
+        }
+        return false;
+    };
+    const isReactFcType = (typeAnnotation) => {
+        if (!typeAnnotation || !t.isTSTypeAnnotation(typeAnnotation))
+            return false;
+        if (!t.isTSTypeReference(typeAnnotation.typeAnnotation))
+            return false;
+        const typeName = typeAnnotation.typeAnnotation.typeName;
+        if (t.isIdentifier(typeName)) {
+            return typeName.name === "FC";
+        }
+        if (t.isTSQualifiedName(typeName)) {
+            return t.isIdentifier(typeName.left) && typeName.left.name === "React"
+                && t.isIdentifier(typeName.right) && typeName.right.name === "FC";
+        }
+        return false;
+    };
     const getJsxName = (name) => {
         if (t.isJSXIdentifier(name))
             return name.name;
@@ -93,23 +126,83 @@ function analyzeReactCode(code, filePath) {
         }
         return undefined;
     };
+    const collectPropsFromParam = (param) => {
+        if (!param)
+            return;
+        if (t.isIdentifier(param)) {
+            pushUnique(result.props, param.name);
+            return;
+        }
+        if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+            pushUnique(result.props, param.left.name);
+            return;
+        }
+        if (t.isObjectPattern(param)) {
+            param.properties.forEach(property => {
+                if (t.isObjectProperty(property) && t.isIdentifier(property.key)) {
+                    pushUnique(result.props, property.key.name);
+                }
+                if (t.isRestElement(property) && t.isIdentifier(property.argument)) {
+                    pushUnique(result.props, property.argument.name);
+                }
+            });
+        }
+    };
     (0, traverse_1.default)(ast, {
         ImportDeclaration(path) {
             pushUnique(result.imports, path.node.source.value);
             path.node.specifiers.forEach(specifier => {
                 pushUnique(result.importSpecifiers, specifier.local.name);
+                if (/^[A-Z]/.test(specifier.local.name)) {
+                    pushUnique(result.componentImports, specifier.local.name);
+                }
             });
+        },
+        TSInterfaceDeclaration(path) {
+            pushUnique(result.interfaces, path.node.id.name);
+        },
+        TSTypeAliasDeclaration(path) {
+            pushUnique(result.types, path.node.id.name);
         },
         FunctionDeclaration(path) {
             const name = path.node.id?.name;
-            if (name && /^[A-Z]/.test(name))
+            if (!name)
+                return;
+            if (/^[A-Z]/.test(name)) {
                 pushUnique(result.components, name);
+                collectPropsFromParam(path.node.params[0]);
+                return;
+            }
+            pushUnique(result.functions, name);
+            pushUnique(result.methods, name);
         },
         VariableDeclarator(path) {
             if (t.isIdentifier(path.node.id) && path.node.id.name && /^[A-Z]/.test(path.node.id.name)) {
                 const init = path.node.init;
                 if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
                     pushUnique(result.components, path.node.id.name);
+                    collectPropsFromParam(init.params[0]);
+                }
+            }
+            if (t.isIdentifier(path.node.id) && path.node.id.name) {
+                if (isReactFcType(path.node.id.typeAnnotation)) {
+                    pushUnique(result.fcComponents, path.node.id.name);
+                    pushUnique(result.components, path.node.id.name);
+                }
+                const init = path.node.init;
+                if (t.isCallExpression(init) && isForwardRefCall(init.callee)) {
+                    pushUnique(result.forwardRefComponents, path.node.id.name);
+                    pushUnique(result.components, path.node.id.name);
+                    const firstArg = init.arguments[0];
+                    if (t.isArrowFunctionExpression(firstArg) || t.isFunctionExpression(firstArg)) {
+                        collectPropsFromParam(firstArg.params[0]);
+                    }
+                }
+                if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
+                    if (!/^[A-Z]/.test(path.node.id.name)) {
+                        pushUnique(result.functions, path.node.id.name);
+                        pushUnique(result.methods, path.node.id.name);
+                    }
                 }
             }
             if (!t.isArrayPattern(path.node.id) || !path.node.init)
@@ -123,6 +216,25 @@ function analyzeReactCode(code, filePath) {
                 if (t.isIdentifier(element))
                     pushUnique(result.stateVariables, element.name);
             });
+        },
+        ClassMethod(path) {
+            if (t.isIdentifier(path.node.key)) {
+                pushUnique(result.methods, path.node.key.name);
+            }
+        },
+        ClassProperty(path) {
+            if (!t.isIdentifier(path.node.key))
+                return;
+            if (!path.node.value)
+                return;
+            if (t.isArrowFunctionExpression(path.node.value) || t.isFunctionExpression(path.node.value)) {
+                pushUnique(result.methods, path.node.key.name);
+            }
+        },
+        ObjectMethod(path) {
+            if (t.isIdentifier(path.node.key)) {
+                pushUnique(result.methods, path.node.key.name);
+            }
         },
         CallExpression(path) {
             const callName = getCallName(path.node.callee);
@@ -154,9 +266,17 @@ function analyzeReactCode(code, filePath) {
             if (t.isFunctionDeclaration(declaration) && declaration.id) {
                 pushUnique(result.exports, declaration.id.name);
             }
+            if (t.isCallExpression(declaration) && isForwardRefCall(declaration.callee)) {
+                pushUnique(result.forwardRefComponents, "default");
+            }
         },
         JSXOpeningElement(path) {
             pushUnique(result.jsxElements, getJsxName(path.node.name));
+            path.node.attributes.forEach(attribute => {
+                if (t.isJSXAttribute(attribute) && t.isJSXIdentifier(attribute.name)) {
+                    pushUnique(result.jsxAttributes, attribute.name.name);
+                }
+            });
         }
     });
     return result;
