@@ -5,5 +5,5 @@ export function getWorkspaceFolder(): string | undefined {
 }
 
 export async function findReactFiles(): Promise<vscode.Uri[]> {
-    return vscode.workspace.findFiles('**/*.{jsx,tsx}', '**/node_modules/**');
+    return vscode.workspace.findFiles('**/*.{js,jsx,ts,tsx}', '**/{node_modules,out,dist,.git}/**');
 }

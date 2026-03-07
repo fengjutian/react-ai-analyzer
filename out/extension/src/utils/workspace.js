@@ -40,6 +40,6 @@ function getWorkspaceFolder() {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 async function findReactFiles() {
-    return vscode.workspace.findFiles('**/*.{jsx,tsx}', '**/node_modules/**');
+    return vscode.workspace.findFiles('**/*.{js,jsx,ts,tsx}', '**/{node_modules,out,dist,.git}/**');
 }
 //# sourceMappingURL=workspace.js.map

@@ -58,11 +58,15 @@ function analyzeReactCode(code, filePath) {
         sourceType: "module",
         plugins: getParserPlugins(filePath)
     });
+    const importNameToSource = new Map();
     const result = {
         components: [],
         forwardRefComponents: [],
         fcComponents: [],
         componentImports: [],
+        componentDependencies: {},
+        componentProfiles: {},
+        knowledgeTriples: [],
         hooks: [],
         imports: [],
         importSpecifiers: [],
@@ -81,6 +85,25 @@ function analyzeReactCode(code, filePath) {
             return;
         if (!list.includes(value))
             list.push(value);
+    };
+    const tripleSet = new Set();
+    const addTriple = (subject, predicate, object) => {
+        const key = `${subject}|${predicate}|${object}`;
+        if (tripleSet.has(key))
+            return;
+        tripleSet.add(key);
+        result.knowledgeTriples.push({ subject, predicate, object });
+    };
+    const ensureComponentProfile = (componentName) => {
+        if (!result.componentProfiles[componentName]) {
+            result.componentProfiles[componentName] = {
+                props: [],
+                hooks: [],
+                stateVariables: [],
+                dependencies: []
+            };
+        }
+        return result.componentProfiles[componentName];
     };
     const getCallName = (callee) => {
         if (t.isIdentifier(callee))
@@ -148,11 +171,96 @@ function analyzeReactCode(code, filePath) {
             });
         }
     };
+    const extractPropsFromParam = (param) => {
+        const props = [];
+        if (!param)
+            return props;
+        if (t.isIdentifier(param)) {
+            props.push(param.name);
+            return props;
+        }
+        if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+            props.push(param.left.name);
+            return props;
+        }
+        if (t.isObjectPattern(param)) {
+            param.properties.forEach(property => {
+                if (t.isObjectProperty(property) && t.isIdentifier(property.key)) {
+                    props.push(property.key.name);
+                }
+                if (t.isRestElement(property) && t.isIdentifier(property.argument)) {
+                    props.push(property.argument.name);
+                }
+            });
+        }
+        return props;
+    };
+    const addComponentDependencies = (componentName, deps) => {
+        if (!result.componentDependencies[componentName]) {
+            result.componentDependencies[componentName] = [];
+        }
+        deps.forEach(dep => pushUnique(result.componentDependencies[componentName], dep));
+    };
+    const collectComponentMetrics = (nodePath) => {
+        const hooks = new Set();
+        const stateVariables = new Set();
+        nodePath.traverse({
+            CallExpression(innerPath) {
+                const callName = getCallName(innerPath.node.callee);
+                if (callName && /^use/.test(callName)) {
+                    hooks.add(callName);
+                }
+            },
+            VariableDeclarator(innerPath) {
+                if (!t.isArrayPattern(innerPath.node.id) || !innerPath.node.init)
+                    return;
+                if (!t.isCallExpression(innerPath.node.init))
+                    return;
+                const callName = getCallName(innerPath.node.init.callee);
+                if (callName !== "useState")
+                    return;
+                innerPath.node.id.elements.forEach(element => {
+                    if (t.isIdentifier(element))
+                        stateVariables.add(element.name);
+                });
+            }
+        });
+        return { hooks, stateVariables };
+    };
+    const addComponentProfile = (componentName, nodePath, firstParam) => {
+        const profile = ensureComponentProfile(componentName);
+        const deps = collectDependenciesFromPath(nodePath);
+        const metrics = collectComponentMetrics(nodePath);
+        const props = extractPropsFromParam(firstParam);
+        deps.forEach(dep => pushUnique(profile.dependencies, dep));
+        metrics.hooks.forEach(hook => pushUnique(profile.hooks, hook));
+        metrics.stateVariables.forEach(state => pushUnique(profile.stateVariables, state));
+        props.forEach(prop => pushUnique(profile.props, prop));
+    };
+    const collectDependenciesFromPath = (nodePath) => {
+        const deps = new Set();
+        nodePath.traverse({
+            Identifier(innerPath) {
+                if (!innerPath.isReferencedIdentifier())
+                    return;
+                const source = importNameToSource.get(innerPath.node.name);
+                if (source)
+                    deps.add(source);
+            },
+            JSXIdentifier(innerPath) {
+                const source = importNameToSource.get(innerPath.node.name);
+                if (source)
+                    deps.add(source);
+            }
+        });
+        return deps;
+    };
     (0, traverse_1.default)(ast, {
         ImportDeclaration(path) {
             pushUnique(result.imports, path.node.source.value);
             path.node.specifiers.forEach(specifier => {
                 pushUnique(result.importSpecifiers, specifier.local.name);
+                importNameToSource.set(specifier.local.name, path.node.source.value);
                 if (/^[A-Z]/.test(specifier.local.name)) {
                     pushUnique(result.componentImports, specifier.local.name);
                 }
@@ -171,6 +279,8 @@ function analyzeReactCode(code, filePath) {
             if (/^[A-Z]/.test(name)) {
                 pushUnique(result.components, name);
                 collectPropsFromParam(path.node.params[0]);
+                addComponentDependencies(name, collectDependenciesFromPath(path));
+                addComponentProfile(name, path, path.node.params[0]);
                 return;
             }
             pushUnique(result.functions, name);
@@ -182,6 +292,8 @@ function analyzeReactCode(code, filePath) {
                 if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
                     pushUnique(result.components, path.node.id.name);
                     collectPropsFromParam(init.params[0]);
+                    addComponentDependencies(path.node.id.name, collectDependenciesFromPath(path.get("init")));
+                    addComponentProfile(path.node.id.name, path.get("init"), init.params[0]);
                 }
             }
             if (t.isIdentifier(path.node.id) && path.node.id.name) {
@@ -193,7 +305,11 @@ function analyzeReactCode(code, filePath) {
                 if (t.isCallExpression(init) && isForwardRefCall(init.callee)) {
                     pushUnique(result.forwardRefComponents, path.node.id.name);
                     pushUnique(result.components, path.node.id.name);
+                    addComponentDependencies(path.node.id.name, collectDependenciesFromPath(path.get("init")));
                     const firstArg = init.arguments[0];
+                    if (t.isArrowFunctionExpression(firstArg) || t.isFunctionExpression(firstArg)) {
+                        addComponentProfile(path.node.id.name, path.get("init"), firstArg.params[0]);
+                    }
                     if (t.isArrowFunctionExpression(firstArg) || t.isFunctionExpression(firstArg)) {
                         collectPropsFromParam(firstArg.params[0]);
                     }
@@ -278,6 +394,27 @@ function analyzeReactCode(code, filePath) {
                 }
             });
         }
+    });
+    Object.entries(result.componentProfiles).forEach(([componentName, profile]) => {
+        profile.props.forEach(prop => addTriple(componentName, "has_prop", prop));
+        profile.hooks.forEach(hook => addTriple(componentName, "uses_hook", hook));
+        profile.stateVariables.forEach(state => addTriple(componentName, "has_state", state));
+        profile.dependencies.forEach(dep => addTriple(componentName, "depends_on", dep));
+    });
+    result.forwardRefComponents.forEach(componentName => {
+        addTriple(componentName, "component_kind", "React.forwardRef");
+    });
+    result.fcComponents.forEach(componentName => {
+        addTriple(componentName, "component_kind", "React.FC");
+    });
+    result.componentImports.forEach(componentName => {
+        addTriple(componentName, "imported_component", "true");
+    });
+    result.interfaces.forEach(name => {
+        addTriple(name, "symbol_kind", "interface");
+    });
+    result.types.forEach(name => {
+        addTriple(name, "symbol_kind", "type_alias");
     });
     return result;
 }

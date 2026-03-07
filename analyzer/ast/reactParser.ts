@@ -2,6 +2,7 @@ import { parse } from "@babel/parser"
 import traverse, { NodePath } from "@babel/traverse"
 import * as t from "@babel/types"
 import * as path from "path"
+import { AnalysisResult } from "../types"
 
 function getParserPlugins(filePath?: string): ("jsx" | "typescript")[] {
   const ext = filePath ? path.extname(filePath).toLowerCase() : ""
@@ -12,17 +13,31 @@ function getParserPlugins(filePath?: string): ("jsx" | "typescript")[] {
   return ["typescript", "jsx"]
 }
 
-export function analyzeReactCode(code: string, filePath?: string) {
+export function analyzeReactCode(code: string, filePath?: string): AnalysisResult {
   const ast = parse(code, {
     sourceType: "module",
     plugins: getParserPlugins(filePath)
   })
 
-  const result = {
+  const importNameToSource = new Map<string, string>()
+
+  const result: AnalysisResult = {
     components: [] as string[],
     forwardRefComponents: [] as string[],
     fcComponents: [] as string[],
     componentImports: [] as string[],
+    componentDependencies: {} as Record<string, string[]>,
+    componentProfiles: {} as Record<string, {
+      props: string[]
+      hooks: string[]
+      stateVariables: string[]
+      dependencies: string[]
+    }>,
+    knowledgeTriples: [] as Array<{
+      subject: string
+      predicate: string
+      object: string
+    }>,
     hooks: [] as string[],
     imports: [] as string[],
     importSpecifiers: [] as string[],
@@ -40,6 +55,26 @@ export function analyzeReactCode(code: string, filePath?: string) {
   const pushUnique = (list: string[], value: string | undefined) => {
     if (!value) return
     if (!list.includes(value)) list.push(value)
+  }
+
+  const tripleSet = new Set<string>()
+  const addTriple = (subject: string, predicate: string, object: string) => {
+    const key = `${subject}|${predicate}|${object}`
+    if (tripleSet.has(key)) return
+    tripleSet.add(key)
+    result.knowledgeTriples.push({ subject, predicate, object })
+  }
+
+  const ensureComponentProfile = (componentName: string) => {
+    if (!result.componentProfiles[componentName]) {
+      result.componentProfiles[componentName] = {
+        props: [],
+        hooks: [],
+        stateVariables: [],
+        dependencies: []
+      }
+    }
+    return result.componentProfiles[componentName]
   }
 
   const getCallName = (callee: t.Expression | t.V8IntrinsicIdentifier) => {
@@ -112,11 +147,107 @@ export function analyzeReactCode(code: string, filePath?: string) {
     }
   }
 
+  const extractPropsFromParam = (param: t.Function["params"][number] | undefined) => {
+    const props: string[] = []
+    if (!param) return props
+
+    if (t.isIdentifier(param)) {
+      props.push(param.name)
+      return props
+    }
+
+    if (t.isAssignmentPattern(param) && t.isIdentifier(param.left)) {
+      props.push(param.left.name)
+      return props
+    }
+
+    if (t.isObjectPattern(param)) {
+      param.properties.forEach(property => {
+        if (t.isObjectProperty(property) && t.isIdentifier(property.key)) {
+          props.push(property.key.name)
+        }
+        if (t.isRestElement(property) && t.isIdentifier(property.argument)) {
+          props.push(property.argument.name)
+        }
+      })
+    }
+
+    return props
+  }
+
+  const addComponentDependencies = (componentName: string, deps: Set<string>) => {
+    if (!result.componentDependencies[componentName]) {
+      result.componentDependencies[componentName] = []
+    }
+    deps.forEach(dep => pushUnique(result.componentDependencies[componentName], dep))
+  }
+
+  const collectComponentMetrics = (nodePath: NodePath<t.Node>) => {
+    const hooks = new Set<string>()
+    const stateVariables = new Set<string>()
+
+    nodePath.traverse({
+      CallExpression(innerPath: NodePath<t.CallExpression>) {
+        const callName = getCallName(innerPath.node.callee)
+        if (callName && /^use/.test(callName)) {
+          hooks.add(callName)
+        }
+      },
+      VariableDeclarator(innerPath: NodePath<t.VariableDeclarator>) {
+        if (!t.isArrayPattern(innerPath.node.id) || !innerPath.node.init) return
+        if (!t.isCallExpression(innerPath.node.init)) return
+        const callName = getCallName(innerPath.node.init.callee)
+        if (callName !== "useState") return
+
+        innerPath.node.id.elements.forEach(element => {
+          if (t.isIdentifier(element)) stateVariables.add(element.name)
+        })
+      }
+    })
+
+    return { hooks, stateVariables }
+  }
+
+  const addComponentProfile = (
+    componentName: string,
+    nodePath: NodePath<t.Node>,
+    firstParam?: t.Function["params"][number]
+  ) => {
+    const profile = ensureComponentProfile(componentName)
+    const deps = collectDependenciesFromPath(nodePath)
+    const metrics = collectComponentMetrics(nodePath)
+    const props = extractPropsFromParam(firstParam)
+
+    deps.forEach(dep => pushUnique(profile.dependencies, dep))
+    metrics.hooks.forEach(hook => pushUnique(profile.hooks, hook))
+    metrics.stateVariables.forEach(state => pushUnique(profile.stateVariables, state))
+    props.forEach(prop => pushUnique(profile.props, prop))
+  }
+
+  const collectDependenciesFromPath = (nodePath: NodePath<t.Node>) => {
+    const deps = new Set<string>()
+
+    nodePath.traverse({
+      Identifier(innerPath: NodePath<t.Identifier>) {
+        if (!innerPath.isReferencedIdentifier()) return
+        const source = importNameToSource.get(innerPath.node.name)
+        if (source) deps.add(source)
+      },
+      JSXIdentifier(innerPath: NodePath<t.JSXIdentifier>) {
+        const source = importNameToSource.get(innerPath.node.name)
+        if (source) deps.add(source)
+      }
+    })
+
+    return deps
+  }
+
   traverse(ast, {
     ImportDeclaration(path: NodePath<t.ImportDeclaration>) {
       pushUnique(result.imports, path.node.source.value)
       path.node.specifiers.forEach(specifier => {
         pushUnique(result.importSpecifiers, specifier.local.name)
+        importNameToSource.set(specifier.local.name, path.node.source.value)
         if (/^[A-Z]/.test(specifier.local.name)) {
           pushUnique(result.componentImports, specifier.local.name)
         }
@@ -135,6 +266,8 @@ export function analyzeReactCode(code: string, filePath?: string) {
       if (/^[A-Z]/.test(name)) {
         pushUnique(result.components, name)
         collectPropsFromParam(path.node.params[0])
+        addComponentDependencies(name, collectDependenciesFromPath(path as NodePath<t.Node>))
+        addComponentProfile(name, path as NodePath<t.Node>, path.node.params[0])
         return
       }
 
@@ -147,6 +280,8 @@ export function analyzeReactCode(code: string, filePath?: string) {
         if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
           pushUnique(result.components, path.node.id.name)
           collectPropsFromParam(init.params[0])
+          addComponentDependencies(path.node.id.name, collectDependenciesFromPath(path.get("init") as NodePath<t.Node>))
+          addComponentProfile(path.node.id.name, path.get("init") as NodePath<t.Node>, init.params[0])
         }
       }
 
@@ -161,7 +296,11 @@ export function analyzeReactCode(code: string, filePath?: string) {
         if (t.isCallExpression(init) && isForwardRefCall(init.callee)) {
           pushUnique(result.forwardRefComponents, path.node.id.name)
           pushUnique(result.components, path.node.id.name)
+          addComponentDependencies(path.node.id.name, collectDependenciesFromPath(path.get("init") as NodePath<t.Node>))
           const firstArg = init.arguments[0]
+          if (t.isArrowFunctionExpression(firstArg) || t.isFunctionExpression(firstArg)) {
+            addComponentProfile(path.node.id.name, path.get("init") as NodePath<t.Node>, firstArg.params[0])
+          }
           if (t.isArrowFunctionExpression(firstArg) || t.isFunctionExpression(firstArg)) {
             collectPropsFromParam(firstArg.params[0])
           }
@@ -243,6 +382,33 @@ export function analyzeReactCode(code: string, filePath?: string) {
         }
       })
     }
+  })
+
+  Object.entries(result.componentProfiles).forEach(([componentName, profile]) => {
+    profile.props.forEach(prop => addTriple(componentName, "has_prop", prop))
+    profile.hooks.forEach(hook => addTriple(componentName, "uses_hook", hook))
+    profile.stateVariables.forEach(state => addTriple(componentName, "has_state", state))
+    profile.dependencies.forEach(dep => addTriple(componentName, "depends_on", dep))
+  })
+
+  result.forwardRefComponents.forEach(componentName => {
+    addTriple(componentName, "component_kind", "React.forwardRef")
+  })
+
+  result.fcComponents.forEach(componentName => {
+    addTriple(componentName, "component_kind", "React.FC")
+  })
+
+  result.componentImports.forEach(componentName => {
+    addTriple(componentName, "imported_component", "true")
+  })
+
+  result.interfaces.forEach(name => {
+    addTriple(name, "symbol_kind", "interface")
+  })
+
+  result.types.forEach(name => {
+    addTriple(name, "symbol_kind", "type_alias")
   })
 
   return result
