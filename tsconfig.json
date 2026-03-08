@@ -19,7 +19,8 @@
     "extension/src/**/*",
     "analyzer/**/*",
     "llm/**/*",
-    "vector/**/*"
+    "vector/**/*",
+    "tests/**/*"
   ],
   "exclude": [
     "node_modules",
